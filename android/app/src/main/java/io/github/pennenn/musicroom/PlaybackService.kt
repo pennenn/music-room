@@ -13,7 +13,6 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import org.json.JSONArray
 import org.json.JSONObject
 
 /** バックグラウンド再生のサービス。ロック画面・通知の操作も Media3 が自動で用意する */
@@ -114,21 +113,10 @@ class PlayLog(private val ctx: Context, private val player: Player) : Player.Lis
 
     companion object {
         @Volatile var onLogged: (() -> Unit)? = null
-        private const val PREF = "plays"
 
-        @Synchronized fun append(ctx: Context, rec: JSONObject) {
-            val sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-            val arr = JSONArray(sp.getString("pending", "[]"))
-            arr.put(rec)
-            sp.edit().putString("pending", arr.toString()).apply()
-        }
+        fun append(ctx: Context, rec: JSONObject) = Pending.add(ctx, "plays", rec)
 
         /** 画面側が受け取ったら消す */
-        @Synchronized fun take(ctx: Context): String {
-            val sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-            val s = sp.getString("pending", "[]") ?: "[]"
-            sp.edit().putString("pending", "[]").commit()
-            return s
-        }
+        fun take(ctx: Context): String = Pending.take(ctx, "plays")
     }
 }

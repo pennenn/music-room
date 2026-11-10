@@ -30,6 +30,8 @@ const ICONS = {
   reload: '<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>', paste: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 3h6v3H9z"/>',
   file: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>', close: '<path d="M6 6l12 12M18 6L6 18"/>', list: '<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
+  browser: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/>',
+  image: '<rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="M20 16l-5-5-7 8"/>',
 };
 const icon = (n, cls = "", fill = false) =>
   `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="${fill ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n]}</svg>`;
@@ -228,7 +230,9 @@ async function hydrateArt(root = document) {
   }
 }
 
-const NAV = [["library", "ライブラリ", "library"], ["mix", "おすすめ", "sparkle"], ["review", "振り返り", "chart"], ["settings", "設定", "settings"]];
+const NAV = [["library", "ライブラリ", "library"], ...(Native.isNative ? [["browser", "ブラウザ", "browser"]] : []),
+  ["mix", "おすすめ", "sparkle"], ["review", "振り返り", "chart"], ["settings", "設定", "settings"]];
+const openBrowser = url => Native.openBrowser(url, S.dl);
 
 function renderNav() {
   $("#nav").innerHTML = NAV.map(([id, label, ic]) =>
@@ -316,10 +320,19 @@ async function trackMenu(key) {
   if (!t) return;
   const items = [{ label: "次に再生", icon: "play", id: "next" }, { label: "プレイリストに追加", icon: "plus", id: "pl" },
     { label: t.liked ? "高評価を解除" : "高評価", icon: "heart", id: "like" }, { label: "ムードを設定", icon: "sparkle", id: "mood" },
+    { label: "曲情報を編集", icon: "edit", id: "edit" }, { label: "アートワークを変更", icon: "image", id: "art" },
+    ...(Native.isNative && t.video_id ? [{ label: "YouTube から情報を取り直す", icon: "reload", id: "refresh" }] : []),
     { label: "この端末から削除", icon: "trash", id: "del" }];
   const c = await sheet(t.title, items);
   if (!c) return;
   if (c.id === "next") { player.playNext([t]); toast("次に再生します"); }
+  if (c.id === "edit") await editInfo(t);
+  if (c.id === "art") pickArt(t);
+  if (c.id === "refresh") {
+    toast("情報を取得しています…", 15000);
+    toast(await refreshTrack(t) ? "曲情報を更新しました" : "取得できませんでした");
+    render(); renderMini();
+  }
   if (c.id === "like") { t.liked = t.liked ? 0 : 1; await saveTrack(t); render(); }
   if (c.id === "pl") await addToPlaylist([t.key]);
   if (c.id === "mood") {
@@ -333,6 +346,74 @@ async function trackMenu(key) {
     await saveTrack(t, false);
     render();
   }
+}
+
+// ---- 曲情報の更新
+function form_(title, fields) {
+  return new Promise(resolve => {
+    const ov = document.createElement("div");
+    ov.className = "overlay";
+    ov.innerHTML = `<div class="dialog"><div class="h2">${esc(title)}</div>
+      ${fields.map((f, i) => `<div class="muted" style="margin:10px 0 4px">${esc(f.label)}</div><input class="field" data-i="${i}" value="${esc(f.value)}">`).join("")}
+      <div class="row" style="justify-content:flex-end;margin-top:16px"><button class="btn" data-r="0">キャンセル</button><button class="btn primary" data-r="1">保存</button></div></div>`;
+    const done = ok => { const v = [...ov.querySelectorAll("input")].map(x => x.value.trim()); ov.remove(); resolve(ok ? v : null); };
+    ov.addEventListener("click", e => { const b = e.target.closest("[data-r]"); if (b) done(b.dataset.r === "1"); else if (e.target === ov) done(false); });
+    document.body.appendChild(ov);
+  });
+}
+
+async function editInfo(t) {
+  const v = await form_("曲情報を編集", [{ label: "タイトル", value: t.title }, { label: "アーティスト", value: t.artist }]);
+  if (!v || !v[0]) return;
+  t.title = v[0]; t.artist = v[1] || "不明なアーティスト";
+  await saveTrack(t);
+  if (player.current?.key === t.key) Object.assign(player.current, { title: t.title, artist: t.artist });
+  toast("曲情報を保存しました");
+  render(); renderMini();
+}
+
+async function setArt(t, name) {
+  const old = t.art;
+  t.art = name;
+  artCache.delete(t.key);
+  await saveTrack(t, false);
+  if (old && old !== name) await db.removeFile("art", old);
+  if (player.current?.key === t.key) player.current.art = name;
+  render(); renderMini();
+}
+
+let artTarget = null;
+function pickArt(t) {
+  artTarget = t;
+  if (Native.isNative) Native.N.pickArt(t.key);
+  else $("#artpick").click();
+}
+
+// YouTube から取り直す（アプリ版のみ）。成功したら true
+async function refreshTrack(t) {
+  const r = await downloader.refreshInfo(t.video_id, t.key);
+  if (!r.ok) return false;
+  Object.assign(t, { title: r.title || t.title, artist: r.artist || t.artist, duration: r.duration || t.duration, tags: r.tags || t.tags });
+  await saveTrack(t);
+  if (r.art) await setArt(t, r.art);
+  return true;
+}
+
+let bulk = null;
+async function refreshAll() {
+  if (bulk) return;
+  const list = localTracks().filter(t => t.video_id);
+  if (!list.length) return toast("YouTube からダウンロードした曲がありません");
+  bulk = { done: 0, total: list.length, ok: 0 };
+  render();
+  for (const t of list) {
+    if (await refreshTrack(t)) bulk.ok++;
+    bulk.done++;
+    if (S.page === "settings") render();
+  }
+  toast(`${bulk.ok} / ${bulk.total} 曲の情報を更新しました`);
+  bulk = null;
+  render();
 }
 
 async function addToPlaylist(keys) {
@@ -445,6 +526,9 @@ function pageDownload() {
       <div class="row wrap" style="margin-top:10px"><button class="btn sm" data-act="ping">${icon("reload", "s")}再接続</button>
       <button class="btn sm" data-act="open-termux">Termux を開く</button></div></div>`;
   }
+  if (Native.isNative) body += `<div class="card"><div class="h2">アプリ内ブラウザで探す</div>
+    <div class="muted" style="margin-bottom:10px">YouTube を見ながら、右下のボタンで表示中の動画をそのままダウンロードできます。</div>
+    <button class="btn primary" data-act="open-browser">${icon("browser", "s")}ブラウザを開く</button></div>`;
   body += `<div class="card"><div class="h2">URL</div><div class="muted" style="margin-bottom:8px">YouTube アプリの「共有」からこのアプリを選んでも追加できます。</div>
     <div class="row"><input class="field grow" id="dl-url" placeholder="https://www.youtube.com/watch?v=…" value="${esc(S.dl.url)}">
     <button class="icon-btn" data-act="dl-paste">${icon("paste")}</button></div>
@@ -539,6 +623,10 @@ function settingsNative() {
     <button class="btn sm" data-act="ytdl-update" ${i.ready ? "" : "disabled"}>${icon("reload", "s")}yt-dlp を更新</button></div>
     <div class="card"><div class="h2">この端末の曲</div><div class="muted">${n} 曲 · ${(size / 1048576).toFixed(0)} MB</div>
     <div class="row wrap" style="margin-top:10px"><button class="btn sm" data-act="import">${icon("file", "s")}ファイルを取り込む</button></div></div>
+    <div class="card"><div class="h2">曲情報をまとめて更新</div>
+    <div class="muted" style="margin-bottom:10px">YouTube からダウンロードした曲の、タイトル・アーティスト・アートワークを取り直します（自分で編集した内容も上書きされます）。</div>
+    ${bulk ? `<div class="muted">更新中… ${bulk.done} / ${bulk.total}</div><div class="prog"><div style="width:${bulk.done / bulk.total * 100}%"></div></div>`
+      : `<button class="btn sm" data-act="refresh-all" ${i.ready ? "" : "disabled"}>${icon("reload", "s")}まとめて更新</button>`}</div>
     <div class="card"><div class="h2">このアプリについて</div><div class="muted">ミュージックルーム（Android 版 ${esc(i.app || "")}）。私的利用の範囲でのみ使用してください。著作権者が許可していない曲の再配布・アップロードはしないでください。曲のファイルはこの端末の中だけに保存されます。</div></div>`;
 }
 
@@ -599,7 +687,9 @@ function bindInputs() {
 }
 
 const ACTIONS = {
-  nav: d => { S.page = d.id; S.openPl = null; S.editPl = false; render(); $("#page").scrollTop = 0; if (d.id === "settings") pingServer(); },
+  nav: d => {
+    if (d.id === "browser") return openBrowser("");
+    S.page = d.id; S.openPl = null; S.editPl = false; render(); $("#page").scrollTop = 0; if (d.id === "settings") pingServer(); },
   "lib-tab": d => { S.libTab = d.id; render(); },
   "play-row": d => player.playTracks(listCache, +d.i),
   "play-list": d => player.playTracks(listCache, 0, { shuffle: !!d.shuffle }),
@@ -652,9 +742,12 @@ const ACTIONS = {
     toast(`「${L.MOODS[d.id].label}」を保存しました`);
   },
   "mood-yt": d => {
-    const url = "https://www.youtube.com/results?search_query=" + encodeURIComponent(L.MOODS[d.id].query);
-    Native.isNative ? Native.N.openUrl(url) : window.open(url, "_blank");
+    const q = encodeURIComponent(L.MOODS[d.id].query);
+    Native.isNative ? openBrowser("https://m.youtube.com/results?search_query=" + q)
+      : window.open("https://www.youtube.com/results?search_query=" + q, "_blank");
   },
+  "open-browser": () => openBrowser(""),
+  "refresh-all": () => refreshAll(),
   bar: d => toast(d.tip, 1600),
   theme: async d => { await setting("theme", d.id); setTheme(d.id); render(); },
   login: () => cloud.signIn().catch(e => toast("ログインできません: " + (e.code || e.message))),
@@ -728,6 +821,14 @@ async function main() {
     else startDownload();
   });
   $("#filepick").addEventListener("change", e => { const f = [...e.target.files]; e.target.value = ""; if (f.length) importFiles(f); });
+  $("#artpick").addEventListener("change", async e => {
+    const f = e.target.files[0]; e.target.value = "";
+    if (!f || !artTarget) return;
+    const name = `${artTarget.key}-${Date.now()}.jpg`;
+    await db.writeFile("art", name, f);
+    await setArt(artTarget, name);
+    toast("アートワークを変更しました");
+  });
   window.addEventListener("popstate", () => $("#np").classList.remove("show"));
   window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; if (S.page === "settings") render(); });
 
@@ -743,6 +844,10 @@ async function main() {
       if (await pingServer()) startDownload();
     });
     Native.on("imported", d => importNative(d.items || []));
+    Native.on("art", async d => {
+      const t = S.tracks.find(x => x.key === d.key);
+      if (t && d.art) { await setArt(t, d.art); toast("アートワークを変更しました"); }
+    });
   }
   if (shared) { S.page = "download"; S.dl.url = shared[0]; history.replaceState(null, "", location.pathname); }
 

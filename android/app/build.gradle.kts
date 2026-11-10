@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.pennenn.musicroom"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
         // 最近の Android 携帯向け（容量を抑えるため 64bit のみ）。エミュレーターでの確認時は -Pabis=x86_64
         ndk { abiFilters += (project.findProperty("abis") as String? ?: "arm64-v8a").split(",") }
     }

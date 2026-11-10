@@ -36,6 +36,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".BrowserActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:windowSoftInputMode="adjustResize" />
+
         <service
             android:name=".PlaybackService"
             android:exported="true"

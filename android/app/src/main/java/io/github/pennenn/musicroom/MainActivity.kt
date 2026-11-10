@@ -49,13 +49,25 @@ class MainActivity : ComponentActivity() {
     private var controller: MediaController? = null
     private val pending = mutableListOf<(MediaController) -> Unit>()
     private var sharedUrl: String? = null
-    private lateinit var downloader: Downloader
+    private val mainListener: (String, JSONObject) -> Unit = { type, data -> emit(type, data) }
+    private var artKey = ""
     private val app get() = App.instance
 
     private val picker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) thread { importUris(uris) }
     }
     private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    // アートワークにする画像を選ぶ
+    private val artPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val key = artKey
+        if (uri != null && key.isNotEmpty()) thread {
+            try {
+                val name = "$key-${System.currentTimeMillis()}.jpg"
+                contentResolver.openInputStream(uri)?.use { inp -> File(app.mediaDir, name).outputStream().use { inp.copyTo(it) } }
+                emit("art", JSONObject().put("key", key).put("art", name))
+            } catch (e: Exception) { emit("art", JSONObject().put("key", key).put("error", e.message ?: "")) }
+        }
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -70,7 +82,7 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        downloader = Downloader { type, data -> emit(type, data) }
+        app.listeners += mainListener
         web = WebView(this)
         root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK); addView(web) }
         setContentView(root)
@@ -112,6 +124,11 @@ class MainActivity : ComponentActivity() {
         }
         if (Build.VERSION.SDK_INT >= 33) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         PlayLog.onLogged = { emit("plays", JSONObject()) }
+    }
+
+    override fun onDestroy() {
+        app.listeners -= mainListener
+        super.onDestroy()
     }
 
     override fun onStart() {
@@ -240,9 +257,33 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface fun sharedUrl(): String { val u = sharedUrl ?: ""; sharedUrl = null; return u }
 
         @JavascriptInterface fun download(url: String, mode: String, bitrate: Int, noPlaylist: Boolean): String =
-            downloader.start(url, mode, bitrate, noPlaylist)
+            app.downloader.start(url, mode, bitrate, noPlaylist)
 
-        @JavascriptInterface fun cancel(id: String) = downloader.cancel(id)
+        @JavascriptInterface fun cancel(id: String) = app.downloader.cancel(id)
+
+        /** ダウンロードで保存したが、まだ画面に登録していない曲 */
+        @JavascriptInterface fun takeSaved(): String = Pending.take(app, "saved")
+
+        /** アプリ内ブラウザを開く（テーマの色とダウンロード設定を渡す） */
+        @JavascriptInterface fun openBrowser(url: String, theme: String, mode: String, bitrate: Int, noPlaylist: Boolean) {
+            val t = try { JSONObject(theme) } catch (e: Exception) { JSONObject() }
+            main.post {
+                startActivity(Intent(this@MainActivity, BrowserActivity::class.java).apply {
+                    putExtra("url", url)
+                    for (k in listOf("bg", "text", "text2", "surface", "primary", "onPrimary")) putExtra(k, t.optString(k).ifEmpty { null })
+                    putExtra("dark", t.optBoolean("dark", true))
+                    putExtra("mode", mode); putExtra("bitrate", bitrate); putExtra("noplaylist", noPlaylist)
+                })
+            }
+        }
+
+        /** YouTube から曲の情報を取り直す（結果は "info" で返す） */
+        @JavascriptInterface fun refreshInfo(videoId: String, key: String) {
+            thread { emit("info", Downloader.fetchInfo(videoId, key)) }
+        }
+
+        /** アートワークにする画像を選ぶ（結果は "art" で返す） */
+        @JavascriptInterface fun pickArt(key: String) { artKey = key; main.post { artPicker.launch("image/*") } }
 
         @JavascriptInterface fun updateYtdlp() { thread { emit("updated", Downloader.update()) } }
 
@@ -306,4 +347,4 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-object BuildConfigInfo { const val VERSION = "1.0" }
+object BuildConfigInfo { const val VERSION = "1.1" }

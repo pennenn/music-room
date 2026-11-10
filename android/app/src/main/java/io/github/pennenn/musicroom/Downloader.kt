@@ -11,11 +11,13 @@ import kotlin.concurrent.thread
 
 /** yt-dlp でダウンロードして、アプリの保存領域に入れる。進み具合は emit で画面に伝える */
 class Downloader(private val emit: (String, JSONObject) -> Unit) {
-    private val running = mutableSetOf<String>()
+    private val running = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val urls = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     fun start(url: String, mode: String, bitrate: Int, noPlaylist: Boolean): String {
         val id = UUID.randomUUID().toString().take(10)
         running += id
+        urls[id] = url
         thread(name = "dl-$id") { run(id, url, mode, bitrate, noPlaylist) }
         return id
     }
@@ -24,7 +26,7 @@ class Downloader(private val emit: (String, JSONObject) -> Unit) {
         YoutubeDL.getInstance().destroyProcessById(id)
     }
 
-    private fun job(id: String) = JSONObject().put("id", id)
+    private fun job(id: String) = JSONObject().put("id", id).put("url", urls[id] ?: "")
 
     private fun run(id: String, url: String, mode: String, bitrate: Int, noPlaylist: Boolean) {
         val app = App.instance
@@ -56,26 +58,13 @@ class Downloader(private val emit: (String, JSONObject) -> Unit) {
             val dst = File(app.mediaDir, "$key.$ext")
             dst.delete()
             if (!src.renameTo(dst)) { src.copyTo(dst, overwrite = true); src.delete() }
-            var art = ""
-            val thumb = info.optString("thumbnail")
-            if (thumb.isNotEmpty()) {
-                try {
-                    val c = URL(thumb).openConnection() as HttpURLConnection
-                    c.connectTimeout = 10000; c.readTimeout = 15000
-                    c.inputStream.use { inp -> File(app.mediaDir, "$key.jpg").outputStream().use { inp.copyTo(it) } }
-                    art = "$key.jpg"
-                } catch (e: Exception) { /* アートワークなし */ }
-            }
-            val artist = listOf("artist", "creator", "uploader", "channel").map { info.optString(it) }
-                .firstOrNull { it.isNotEmpty() && it != "null" }?.replace(Regex("""\s*-\s*Topic$"""), "") ?: ""
-            val tags = (info.optJSONArray("tags")?.let { a -> (0 until minOf(a.length(), 30)).map { a.optString(it) } } ?: emptyList()) +
-                (info.optJSONArray("categories")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList())
+            val art = saveThumb(info.optString("thumbnail"), key) ?: ""
             saved++
-            emit("saved", JSONObject()
-                .put("job", id).put("file", dst.name).put("art", art).put("ext", ext).put("size", dst.length())
-                .put("title", info.optString("track").ifEmpty { info.optString("title") })
-                .put("artist", artist).put("duration", info.optDouble("duration", 0.0))
-                .put("video_id", vid).put("tags", tags.joinToString(" ").take(2000)))
+            val rec = meta(info).put("job", id).put("file", dst.name).put("art", art).put("ext", ext).put("size", dst.length())
+            // 画面が閉じていても取りこぼさないよう、いったん端末に置いてから知らせる
+            Pending.add(app, "saved", rec)
+            emit("saved", rec)
+            emit("job", job(id).put("status", "running").put("saved", saved).put("title", rec.optString("title")))
         }
 
         val req = YoutubeDLRequest(url)
@@ -127,6 +116,46 @@ class Downloader(private val emit: (String, JSONObject) -> Unit) {
     }
 
     companion object {
+        /** yt-dlp の情報から、画面に渡す曲情報（タイトル・アーティストなど）を取り出す */
+        fun meta(info: JSONObject): JSONObject {
+            val artist = listOf("artist", "creator", "uploader", "channel").map { info.optString(it) }
+                .firstOrNull { it.isNotEmpty() && it != "null" }?.replace(Regex("""\s*-\s*Topic$"""), "") ?: ""
+            val tags = (info.optJSONArray("tags")?.let { a -> (0 until minOf(a.length(), 30)).map { a.optString(it) } } ?: emptyList()) +
+                (info.optJSONArray("categories")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList())
+            return JSONObject()
+                .put("title", info.optString("track").takeIf { it.isNotEmpty() && it != "null" } ?: info.optString("title"))
+                .put("artist", artist).put("duration", info.optDouble("duration", 0.0))
+                .put("video_id", info.optString("id")).put("tags", tags.joinToString(" ").take(2000))
+        }
+
+        /** サムネイルを保存してファイル名を返す（名前に時刻を付けて、表示のキャッシュを避ける） */
+        fun saveThumb(url: String, key: String, stamp: Boolean = false): String? {
+            if (url.isEmpty() || url == "null") return null
+            val name = if (stamp) "$key-${System.currentTimeMillis()}.jpg" else "$key.jpg"
+            return try {
+                val c = URL(url).openConnection() as HttpURLConnection
+                c.connectTimeout = 10000; c.readTimeout = 15000
+                c.inputStream.use { inp -> File(App.instance.mediaDir, name).outputStream().use { inp.copyTo(it) } }
+                name
+            } catch (e: Exception) { null }
+        }
+
+        /** YouTube から曲の情報を取り直す（ダウンロードはしない） */
+        fun fetchInfo(videoId: String, key: String): JSONObject = try {
+            App.readyLatch.await()
+            val req = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId")
+            req.addOption("--dump-json")
+            req.addOption("--skip-download")
+            req.addOption("--no-playlist")
+            val res = YoutubeDL.getInstance().execute(req, "info-$key")
+            val line = res.out.lineSequence().firstOrNull { it.startsWith("{") } ?: throw Exception("情報を取得できませんでした")
+            val info = JSONObject(line)
+            meta(info).put("ok", true).put("key", key).put("art", saveThumb(info.optString("thumbnail"), key, true) ?: "")
+        } catch (e: Exception) {
+            JSONObject().put("ok", false).put("key", key)
+                .put("error", (e.message ?: e.toString()).lines().lastOrNull { it.contains("ERROR") } ?: (e.message ?: "失敗しました"))
+        }
+
         fun update(): JSONObject = try {
             App.readyLatch.await()
             val st = YoutubeDL.getInstance().updateYoutubeDL(App.instance, YoutubeDL.UpdateChannel._STABLE)
