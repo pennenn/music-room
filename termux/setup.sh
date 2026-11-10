@@ -4,9 +4,30 @@
 set -e
 BASE="https://pennenn.github.io/music-room/termux"
 
-echo "== パッケージを入れています（数分かかります）=="
-pkg update -y
-pkg install -y python ffmpeg nodejs-lts curl
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTS='-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold'
+
+echo "== パッケージを最新にしています（数分かかります）=="
+# 入っているパッケージを先に全部更新する（古いライブラリが残ると ffmpeg が起動できない）
+apt-get update
+yes | apt-get $APT_OPTS -y full-upgrade
+apt-get $APT_OPTS -y --fix-broken install || true
+
+echo "== 必要なパッケージを入れています =="
+pkg install -y python nodejs-lts curl
+
+# ffmpeg は MP3 変換にだけ使う。入らなくても M4A でダウンロードできるので先へ進む
+if pkg install -y ffmpeg && ffmpeg -version >/dev/null 2>&1; then
+  echo "ffmpeg: OK"
+else
+  apt-get $APT_OPTS -y --fix-broken install || true
+  if ffmpeg -version >/dev/null 2>&1; then
+    echo "ffmpeg: OK"
+  else
+    echo "※ ffmpeg を使えませんでした。M4A のみでダウンロードします（後で pkg upgrade → pkg install ffmpeg で再挑戦できます）"
+    apt-get -y remove ffmpeg >/dev/null 2>&1 || true
+  fi
+fi
 
 echo "== yt-dlp を入れています =="
 pip install -U "yt-dlp[default]"
