@@ -1,7 +1,7 @@
 // Service Worker：アプリ本体をキャッシュして、ネットが無くても開けるようにする
-const CACHE = "music-room-v1";
+const CACHE = "music-room-v2";
 const ASSETS = ["./", "index.html", "firebase-config.js", "manifest.webmanifest", "js/app.js", "js/db.js", "js/logic.js",
-  "js/player.js", "js/termux.js", "js/cloud.js", "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png",
+  "js/player.js", "js/termux.js", "js/cloud.js", "js/native.js", "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png",
   "icons/favicon-64.png"];
 
 self.addEventListener("install", e => {

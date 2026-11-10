@@ -50,6 +50,10 @@ export async function getMeta(k, def = null) {
 export async function setMeta(k, v) { return put("meta", { k, v }); }
 
 // ---------- OPFS（音声ファイルとアートワーク）
+// Android アプリ版では、ファイルはアプリの保存領域にあり、https://appassets.androidplatform.net/files/ から読める
+const NATIVE = typeof window !== "undefined" && !!window.NativeApp;
+const nativeUrl = name => `https://appassets.androidplatform.net/files/${encodeURIComponent(name)}`;
+
 async function dir(name) {
   const root = await navigator.storage.getDirectory();
   return root.getDirectoryHandle(name, { create: true });
@@ -64,12 +68,18 @@ export async function writeFile(folder, name, blob) {
 }
 
 export async function readFile(folder, name) {
+  if (NATIVE) {
+    const r = await fetch(nativeUrl(name));
+    if (!r.ok) throw new Error("not found");
+    return r.blob();
+  }
   const d = await dir(folder);
   const fh = await d.getFileHandle(name);
   return fh.getFile();
 }
 
 export async function removeFile(folder, name) {
+  if (NATIVE) { window.NativeApp.deleteFile(name); return; }
   try { const d = await dir(folder); await d.removeEntry(name); } catch (e) { /* 無ければ何もしない */ }
 }
 

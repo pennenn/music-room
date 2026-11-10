@@ -4,6 +4,7 @@ import * as L from "./logic.js";
 import { Player } from "./player.js";
 import { Downloader, DEFAULT_SERVER } from "./termux.js";
 import { Cloud, configured } from "./cloud.js";
+import * as Native from "./native.js";
 
 // ============================================================ 共通
 const $ = (s, el = document) => el.querySelector(s);
@@ -91,6 +92,34 @@ async function addTrack({ blob, ext, title, artist, duration, videoId, tags, thu
   return t;
 }
 
+// Android アプリ版：ファイルは Android 側で保存済み。情報だけ登録する
+async function registerNative({ file, art, ext, size, title, artist, duration, videoId, tags }) {
+  const key = await L.trackKey(videoId, title, artist);
+  const old = S.tracks.find(t => t.key === key);
+  if (old?.file && old.file !== file) await db.removeFile("tracks", old.file);   // 同じ曲を入れ直したら古い方を消す
+  if (old?.art && art && old.art !== art) await db.removeFile("art", old.art);
+  artCache.delete(key);
+  const t = Object.assign(old || { liked: 0, mood: null, analyzed: 0 }, {
+    key, title, artist: artist || "不明なアーティスト", duration: duration || 0, file, art: art || old?.art || null,
+    ext, size, tags: tags || "", video_id: videoId || null, added: Date.now(),
+  });
+  if (!old || !old.file) t.analyzed = 0;
+  await saveTrack(t, true);
+  queueAnalysis();
+  if (S.page === "library") render();
+  return t;
+}
+
+async function importNative(items) {
+  for (const it of items) {
+    const g = L.guessFromFilename(it.name || it.file);
+    await registerNative({ file: it.file, ext: it.ext, size: it.size, title: it.title || g.title,
+      artist: it.artist || g.artist, duration: it.duration });
+  }
+  toast(`${items.length} 曲を取り込みました`);
+  render();
+}
+
 async function importFiles(files) {
   let n = 0;
   for (const f of files) {
@@ -133,6 +162,7 @@ async function queueAnalysis() {
 function setTheme(name) {
   document.documentElement.dataset.theme = name;
   $('meta[name="theme-color"]').content = THEMES[name][1];
+  if (Native.isNative) Native.N.setBarColor(THEMES[name][1], name !== "light");   // ステータスバーの色も合わせる
 }
 
 function toast(msg, ms = 3000) {
@@ -405,7 +435,11 @@ function pageDownload() {
   const head = `<button class="icon-btn" data-act="nav" data-id="library">${icon("back")}</button><h1>ダウンロード</h1>
     <span class="row muted" style="font-size:12px"><span class="dot ${S.server ? "ok" : ""}"></span>${S.server ? "接続中" : "未接続"}</span>`;
   let body = "";
-  if (!S.server) {
+  if (Native.isNative && !S.server) {
+    body += `<div class="card"><div class="h2">ダウンロード機能を準備しています</div>
+      <div class="muted">初回は数十秒かかります。しばらくしてから「再接続」を押してください。</div>
+      <button class="btn sm" data-act="ping" style="margin-top:10px">${icon("reload", "s")}再接続</button></div>`;
+  } else if (!S.server) {
     body += `<div class="card"><div class="h2">ダウンロードサーバーが見つかりません</div>
       <div class="muted">Termux を開いて <code>ytdl</code> と入力し、サーバーを起動してください。初めての場合は「設定 → ダウンロードサーバー」の手順を見てください。</div>
       <div class="row wrap" style="margin-top:10px"><button class="btn sm" data-act="ping">${icon("reload", "s")}再接続</button>
@@ -460,6 +494,7 @@ function pageSettings() {
   const theme = S.settings.theme || "lightsout";
   let body = `<div class="card"><div class="h2">テーマ</div><div class="tiles">${Object.entries(THEMES).map(([id, [l, bg, fg]]) =>
     `<button class="theme-tile ${theme === id ? "on" : ""}" data-act="theme" data-id="${id}" style="background:${bg};color:${fg}">${l}</button>`).join("")}</div></div>`;
+  if (Native.isNative) return [head, body + settingsNative()];
   // 同期
   body += `<div class="card"><div class="h2">PC と同期</div>`;
   if (!configured()) body += `<div class="muted">firebase-config.js が未設定のため、同期は使えません。</div>`;
@@ -492,6 +527,19 @@ function pageSettings() {
     if (el && u) el.textContent = `使用 ${(u.usage / 1048576).toFixed(0)} MB / 空き ${((u.quota - u.usage) / 1073741824).toFixed(1)} GB · ${localTracks().length} 曲`;
   });
   return [head, body];
+}
+
+// Android アプリ版の設定（ダウンロード機能は内蔵、同期なし）
+function settingsNative() {
+  const i = Native.info() || {};
+  const n = localTracks().length, size = localTracks().reduce((a, t) => a + (t.size || 0), 0);
+  return `<div class="card"><div class="h2">ダウンロード機能</div>
+    <div class="row muted" style="margin-bottom:8px"><span class="dot ${i.ready ? "ok" : ""}"></span>${i.ready ? `アプリに内蔵 · yt-dlp ${esc(i.ytdlp)}` : i.error ? `準備に失敗: ${esc(i.error)}` : "準備中…"}</div>
+    <div class="muted" style="margin-bottom:10px">ダウンロードに失敗するようになったら、yt-dlp を更新してください（YouTube の仕様変更に追従します）。</div>
+    <button class="btn sm" data-act="ytdl-update" ${i.ready ? "" : "disabled"}>${icon("reload", "s")}yt-dlp を更新</button></div>
+    <div class="card"><div class="h2">この端末の曲</div><div class="muted">${n} 曲 · ${(size / 1048576).toFixed(0)} MB</div>
+    <div class="row wrap" style="margin-top:10px"><button class="btn sm" data-act="import">${icon("file", "s")}ファイルを取り込む</button></div></div>
+    <div class="card"><div class="h2">このアプリについて</div><div class="muted">ミュージックルーム（Android 版 ${esc(i.app || "")}）。私的利用の範囲でのみ使用してください。著作権者が許可していない曲の再配布・アップロードはしないでください。曲のファイルはこの端末の中だけに保存されます。</div></div>`;
 }
 
 // ============================================================ プレイヤー表示
@@ -557,7 +605,7 @@ const ACTIONS = {
   "play-list": d => player.playTracks(listCache, 0, { shuffle: !!d.shuffle }),
   like: async d => { const t = S.tracks.find(x => x.key === d.key); if (!t) return; t.liked = t.liked ? 0 : 1; await saveTrack(t); render(); renderMini(); },
   "track-menu": d => trackMenu(d.key),
-  import: () => $("#filepick").click(),
+  import: () => (Native.isNative ? Native.N.importFiles() : $("#filepick").click()),
   "pl-new": async () => {
     const name = await prompt_("新しいプレイリスト");
     if (name) { await savePlaylist({ id: crypto.randomUUID().replace(/-/g, "").slice(0, 20), name, items: [], created: Date.now(), deleted: 0 }); render(); }
@@ -603,7 +651,10 @@ const ACTIONS = {
     await savePlaylist({ id: crypto.randomUUID().replace(/-/g, "").slice(0, 20), name: L.MOODS[d.id].label, items: list.map(t => t.key), created: Date.now(), deleted: 0 });
     toast(`「${L.MOODS[d.id].label}」を保存しました`);
   },
-  "mood-yt": d => window.open("https://www.youtube.com/results?search_query=" + encodeURIComponent(L.MOODS[d.id].query), "_blank"),
+  "mood-yt": d => {
+    const url = "https://www.youtube.com/results?search_query=" + encodeURIComponent(L.MOODS[d.id].query);
+    Native.isNative ? Native.N.openUrl(url) : window.open(url, "_blank");
+  },
   bar: d => toast(d.tip, 1600),
   theme: async d => { await setting("theme", d.id); setTheme(d.id); render(); },
   login: () => cloud.signIn().catch(e => toast("ログインできません: " + (e.code || e.message))),
@@ -613,7 +664,11 @@ const ACTIONS = {
   "open-termux": () => { location.href = "intent:#Intent;package=com.termux;end"; },
   "ytdl-update": async () => {
     toast("yt-dlp を更新しています…", 8000);
-    try { const r = await downloader.update(); toast(r.ok ? "更新しました。Termux で ytdl を起動し直してください" : "更新に失敗しました", 6000); }
+    try {
+      const r = await downloader.update();
+      toast(!r.ok ? "更新に失敗しました" : Native.isNative ? `更新しました（yt-dlp ${r.version || ""}）` : "更新しました。Termux で ytdl を起動し直してください", 6000);
+      if (S.page === "settings") render();
+    }
     catch (e) { toast("更新に失敗しました"); }
   },
   install: async () => { if (installEvt) { installEvt.prompt(); installEvt = null; render(); } },
@@ -647,7 +702,7 @@ async function main() {
   if (!device) { device = "m-" + crypto.randomUUID().slice(0, 8); await db.setMeta("device", device); }
   await loadAll();
 
-  player = new Player(device);
+  player = Native.isNative ? new Native.NativePlayer(device) : new Player(device);
   player.addEventListener("track", () => { renderMini(); if (S.page === "library") render(); });
   player.addEventListener("state", renderMini);
   player.addEventListener("mode", () => { if ($("#np").classList.contains("show")) renderNp(); });
@@ -660,11 +715,12 @@ async function main() {
   player.addEventListener("error", e => toast(`再生できません: ${e.detail.title}`));
   player.addEventListener("empty", () => { const l = localTracks(); if (l.length) player.playTracks(l, 0, { shuffle: true }); });
 
-  downloader = new Downloader(() => S.settings.server, async (item, audio, thumb) => {
-    await addTrack({ blob: audio, ext: item.ext, title: item.title, artist: item.artist, duration: item.duration,
-      videoId: item.video_id, tags: item.tags, thumb });
-    if (S.page === "library") render();
-  });
+  downloader = Native.isNative ? new Native.NativeDownloader(registerNative)
+    : new Downloader(() => S.settings.server, async (item, audio, thumb) => {
+      await addTrack({ blob: audio, ext: item.ext, title: item.title, artist: item.artist, duration: item.duration,
+        videoId: item.video_id, tags: item.tags, thumb });
+      if (S.page === "library") render();
+    });
   downloader.addEventListener("change", () => { if (S.page === "download") render(); else renderNav(); });
 
   $("#fab").addEventListener("click", () => {
@@ -677,13 +733,24 @@ async function main() {
 
   // 共有メニューから開かれたとき（YouTube アプリ →「共有」→ このアプリ）
   const q = new URLSearchParams(location.search);
-  const shared = [q.get("url"), q.get("text"), q.get("title")].filter(Boolean).join(" ").match(/https?:\/\/\S+/);
+  let shared = [q.get("url"), q.get("text"), q.get("title")].filter(Boolean).join(" ").match(/https?:\/\/\S+/);
+  if (Native.isNative) {
+    const u = Native.N.sharedUrl();
+    if (u) shared = [u];
+    // アプリを開いている間に「共有」されたとき
+    Native.on("shared", async d => {
+      S.page = "download"; S.dl.url = d.url; render();
+      if (await pingServer()) startDownload();
+    });
+    Native.on("imported", d => importNative(d.items || []));
+  }
   if (shared) { S.page = "download"; S.dl.url = shared[0]; history.replaceState(null, "", location.pathname); }
 
   render();
   renderMini();
   pingServer().then(ok => { if (ok && shared) startDownload(); });
 
+  if (Native.isNative) { queueAnalysis(); return; }   // アプリ版は同期・Service Worker を使わない
   cloud = new Cloud(device);
   for (const ev of ["user", "status"]) cloud.addEventListener(ev, () => { if (S.page === "settings") render(); });
   cloud.addEventListener("changed", async () => { await loadAll(); if (["library", "review", "mix"].includes(S.page)) render(); });
