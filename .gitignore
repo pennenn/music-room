@@ -1,0 +1,6 @@
+*.mp3
+*.m4a
+*.webm
+*.opus
+__pycache__/
+*-firebase-adminsdk-*.json

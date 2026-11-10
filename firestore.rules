@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ---- 電験ルーム（これまでのルールそのまま）
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+      match /tokens/{token} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+    // ---- ミュージックルーム：曲の情報・高評価・プレイリスト・再生履歴（本人だけ）
+    match /music/{uid}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}
